@@ -7,13 +7,12 @@ import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamiccolor.ColorSpec
 import com.materialkolor.rememberDynamicColorScheme
 
-private val IosBlue = Color(0xFF0A84FF)
 private val IosRed = Color(255, 66, 69)
 
 // TODO: actually use UIColor values on iOS
 @Composable
 fun lightIosColorScheme(
-	accent: Color = IosBlue
+	accent: Color
 ): ColorScheme {
 	return rememberDynamicColorScheme(
 		primary = Color.White,
@@ -36,7 +35,8 @@ fun lightIosColorScheme(
 				error = IosRed,
 				onError = Color.White,
 				errorContainer = IosRed,
-				onErrorContainer = Color.White
+				onErrorContainer = Color.White,
+				surfaceVariant = Color(224, 221, 220)
 			)
 		}
 	)
@@ -44,7 +44,7 @@ fun lightIosColorScheme(
 
 @Composable
 fun darkIosColorScheme(
-	accent: Color = IosBlue
+	accent: Color
 ): ColorScheme {
 	return rememberDynamicColorScheme(
 		primary = Color.White,

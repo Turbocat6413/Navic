@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -17,7 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
@@ -45,7 +53,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
-import com.kyant.capsule.ContinuousCapsule
+import coil3.compose.LocalPlatformContext
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.kyant.capsule.ContinuousRoundedRectangle
 import navic.composeapp.generated.resources.Res
 import navic.composeapp.generated.resources.action_add_all_to_playlist
@@ -72,6 +83,7 @@ import paige.navic.LocalMediaPlayer
 import paige.navic.LocalNavStack
 import paige.navic.data.models.Screen
 import paige.navic.data.models.Settings
+import paige.navic.data.session.SessionManager
 import paige.navic.icons.Icons
 import paige.navic.icons.brand.Lastfm
 import paige.navic.icons.brand.Musicbrainz
@@ -88,10 +100,8 @@ import paige.navic.shared.MediaPlayerViewModel
 import paige.navic.ui.components.common.Dropdown
 import paige.navic.ui.components.common.DropdownItem
 import paige.navic.ui.components.common.ErrorBox
-import paige.navic.ui.components.common.Form
 import paige.navic.ui.components.common.FormRow
 import paige.navic.ui.components.common.MarqueeText
-import paige.navic.ui.components.common.RefreshBox
 import paige.navic.ui.components.dialogs.ShareDialog
 import paige.navic.ui.components.layouts.NestedTopBar
 import paige.navic.ui.components.layouts.TopBarButton
@@ -211,17 +221,14 @@ fun TracksScreen(
 		},
 		contentWindowInsets = WindowInsets.statusBars
 	) { innerPadding ->
-		RefreshBox(
+		PullToRefreshBox(
 			modifier = Modifier
 				.padding(innerPadding)
 				.background(MaterialTheme.colorScheme.surface),
 			isRefreshing = tracks is UiState.Loading,
 			onRefresh = { viewModel.refreshTracks() }
-		) { topPadding ->
-			AnimatedContent(
-				tracks,
-				modifier = Modifier.padding(top = topPadding)
-			) {
+		) {
+			AnimatedContent(tracks) {
 				when (it) {
 					is UiState.Loading -> TracksScreenPlaceholder()
 					is UiState.Error -> ErrorBox(it)
@@ -231,120 +238,168 @@ fun TracksScreen(
 							player,
 							tracks
 						).apply {
-							Column(
+							LazyColumn(
 								modifier = Modifier
 									.background(MaterialTheme.colorScheme.surface)
-									.verticalScroll(scrollState)
-									.padding(top = 16.dp, end = 16.dp, start = 16.dp),
-								horizontalAlignment = Alignment.CenterHorizontally
+									.fillMaxSize(),
+								horizontalAlignment = Alignment.CenterHorizontally,
+								contentPadding = PaddingValues(
+									top = 16.dp,
+									end = 16.dp,
+									start = 16.dp,
+									bottom = LocalContentPadding.current.calculateBottomPadding()
+								)
 							) {
-								Metadata()
-								Spacer(Modifier.height(10.dp))
-								Form {
-									tracks.tracks.onEachIndexed { index, track ->
-										Box {
-											TrackRow(
-												track = track,
-												index = index,
-												onClick = {
-													player.play(tracks, index)
-												},
-												onLongClick = {
-													viewModel.selectTrack(track, index)
-												}
-											)
-											Dropdown(
-												expanded = selection == track && selectedIndex == index,
-												onDismissRequest = {
-													viewModel.clearSelection()
-												}
-											) {
-												DropdownItem(
-													containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-													text = { Text(stringResource(Res.string.action_share)) },
-													leadingIcon = { Icon(Icons.Outlined.Share, null) },
-													onClick = {
-														shareId = track.id
-														viewModel.clearSelection()
-													},
+								item {
+									Metadata()
+									Spacer(Modifier.height(10.dp))
+								}
+								// we can't use Form here because it's not lazy and if there's
+								// around 40 items you can't interact with them after the 40th
+								itemsIndexed(tracks.tracks) { index, track ->
+									Box {
+										TrackRow(
+											modifier = Modifier
+												// workaround that mimics the styling of Form
+												// this is temporary and should be cleaned up
+												// because it's garbage
+												//
+												// ideally we should do this everywhere in the
+												// app and just stop using non-lazy things where
+												// possible
+												.clip(when (index) {
+													0 -> ContinuousRoundedRectangle(
+														topStart = 18.dp,
+														topEnd = 18.dp
+													)
+													tracks.tracks.lastIndex -> ContinuousRoundedRectangle(
+														bottomStart = 18.dp,
+														bottomEnd = 18.dp
+													)
+													else -> RectangleShape
+												})
+												.background(
+													if (Settings.shared.theme != Settings.Theme.iOS
+														&& Settings.shared.theme != Settings.Theme.Spotify
+														&& Settings.shared.theme != Settings.Theme.AppleMusic
+													) Color.Unspecified else MaterialTheme.colorScheme.surfaceContainerHighest
 												)
-												val starred =
-													(starredState as? UiState.Success)?.data
-												DropdownItem(
-													containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-													text = {
-														Text(
-															stringResource(
-																if (starred == true)
-																	Res.string.action_remove_star
-																else Res.string.action_star
+												.padding(
+													bottom = if (index != tracks.tracks.lastIndex)
+														if (Settings.shared.theme.isMaterialLike())
+															3.dp
+														else 1.dp
+													else 0.dp
+												),
+											track = track,
+											index = index,
+											onClick = {
+												player.play(tracks, index)
+											},
+											onLongClick = {
+												viewModel.selectTrack(track, index)
+											}
+										)
+										Dropdown(
+											expanded = selection == track && selectedIndex == index,
+											onDismissRequest = {
+												viewModel.clearSelection()
+											}
+										) {
+											DropdownItem(
+												containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+												text = { Text(stringResource(Res.string.action_share)) },
+												leadingIcon = { Icon(Icons.Outlined.Share, null) },
+												onClick = {
+													shareId = track.id
+													viewModel.clearSelection()
+												},
+											)
+											val starred =
+												(starredState as? UiState.Success)?.data
+											DropdownItem(
+												containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+												text = {
+													Text(
+														stringResource(
+															if (starred == true)
+																Res.string.action_remove_star
+															else Res.string.action_star
+														)
+													)
+												},
+												leadingIcon = {
+													Icon(
+														if (starred == true)
+															Icons.Filled.Star
+														else Icons.Outlined.Star,
+														null
+													)
+												},
+												onClick = {
+													if (starred == true)
+														viewModel.unstarSelectedTrack()
+													else viewModel.starSelectedTrack()
+													viewModel.clearSelection()
+												},
+												enabled = starred != null
+											)
+											DropdownItem(
+												containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+												text = { Text(stringResource(Res.string.action_track_info)) },
+												leadingIcon = { Icon(Icons.Outlined.Info, null) },
+												onClick = {
+													backStack.add(Screen.TrackInfo(track))
+													viewModel.clearSelection()
+												},
+											)
+											DropdownItem(
+												containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+												text = {
+													Text(
+														stringResource(
+															if (tracks is Playlist)
+																Res.string.action_add_to_another_playlist
+															else Res.string.action_add_to_playlist
+														)
+													)
+												},
+												leadingIcon = {
+													Icon(
+														Icons.Outlined.PlaylistAdd,
+														null
+													)
+												},
+												onClick = {
+													viewModel.clearSelection()
+													if (backStack.lastOrNull() !is Screen.AddToPlaylist) {
+														backStack.add(
+															Screen.AddToPlaylist(
+																listOf(track),
+																playlistToExclude = tracks.id
 															)
 														)
-													},
+													}
+												},
+											)
+											if (tracks is Playlist) {
+												DropdownItem(
+													containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+													text = { Text(stringResource(Res.string.action_remove_from_playlist)) },
 													leadingIcon = {
 														Icon(
-															if (starred == true)
-																Icons.Filled.Star
-															else Icons.Outlined.Star,
+															Icons.Outlined.PlaylistRemove,
 															null
 														)
 													},
 													onClick = {
-														if (starred == true)
-															viewModel.unstarSelectedTrack()
-														else viewModel.starSelectedTrack()
-														viewModel.clearSelection()
-													},
-													enabled = starred != null
-												)
-												DropdownItem(
-													containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-													text = { Text(stringResource(Res.string.action_track_info)) },
-													leadingIcon = { Icon(Icons.Outlined.Info, null) },
-													onClick = {
-														backStack.add(Screen.TrackInfo(track))
-														viewModel.clearSelection()
+														viewModel.removeFromPlaylist()
 													},
 												)
-												DropdownItem(
-													containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-													text = {
-														Text(
-															stringResource(
-																if (tracks is Playlist)
-																	Res.string.action_add_to_another_playlist
-																else Res.string.action_add_to_playlist
-															)
-														)
-													},
-													leadingIcon = { Icon(Icons.Outlined.PlaylistAdd, null) },
-													onClick = {
-														viewModel.clearSelection()
-														if (backStack.lastOrNull() !is Screen.AddToPlaylist) {
-															backStack.add(
-																Screen.AddToPlaylist(
-																	listOf(track),
-																	playlistToExclude = tracks.id
-																)
-															)
-														}
-													},
-												)
-												if (tracks is Playlist) {
-													DropdownItem(
-														containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-														text = { Text(stringResource(Res.string.action_remove_from_playlist)) },
-														leadingIcon = { Icon(Icons.Outlined.PlaylistRemove, null) },
-														onClick = {
-															viewModel.removeFromPlaylist()
-														},
-													)
-												}
 											}
 										}
 									}
 								}
-								Spacer(Modifier.height(LocalContentPadding.current.calculateBottomPadding()))
 							}
 						}
 					}
@@ -365,11 +420,22 @@ fun TracksScreen(
 
 @Composable
 private fun TracksScreenScope.Metadata() {
+	val platformContext = LocalPlatformContext.current
 	val uriHandler = LocalUriHandler.current
 	val backStack = LocalNavStack.current
 	val artGridRounding = Settings.shared.artGridRounding
+	val model = remember(tracks.coverArt) {
+		ImageRequest.Builder(platformContext)
+			.data(SessionManager.api.getCoverArtUrl(tracks.coverArt, auth = true))
+			.memoryCacheKey(tracks.coverArt)
+			.diskCacheKey(tracks.coverArt)
+			.diskCachePolicy(CachePolicy.ENABLED)
+			.memoryCachePolicy(CachePolicy.ENABLED)
+			.crossfade(500)
+			.build()
+	}
 	AsyncImage(
-		model = tracks.coverArt,
+		model = model,
 		contentDescription = tracks.title,
 		contentScale = ContentScale.Crop,
 		modifier = Modifier
@@ -385,7 +451,7 @@ private fun TracksScreenScope.Metadata() {
 			)
 			.background(MaterialTheme.colorScheme.surfaceContainer)
 			.clickable {
-				tracks.coverArt?.let { uri ->
+				(model.data as? String)?.let { uri ->
 					uriHandler.openUri(uri)
 				}
 			}
@@ -416,7 +482,11 @@ private fun TracksScreenScope.Metadata() {
 		}
 		Text(
 			if (tracks !is Playlist)
-				"${tracks.genre ?: stringResource(Res.string.info_unknown_genre)} • ${tracks.year ?: stringResource(Res.string.info_unknown_year)}"
+				"${tracks.genre ?: stringResource(Res.string.info_unknown_genre)} • ${
+					tracks.year ?: stringResource(
+						Res.string.info_unknown_year
+					)
+				}"
 			else stringResource(Res.string.subtitle_playlist),
 			color = MaterialTheme.colorScheme.onSurfaceVariant,
 			style = MaterialTheme.typography.bodySmall,
@@ -469,16 +539,17 @@ private fun TracksScreenScope.Metadata() {
 
 @Composable
 private fun TrackRow(
+	modifier: Modifier = Modifier,
 	track: Track,
 	index: Int,
 	onClick: (() -> Unit)? = null,
 	onLongClick: (() -> Unit)? = null
 ) {
 	FormRow(
+		modifier = modifier.fillMaxWidth(),
 		onClick = onClick,
 		onLongClick = onLongClick,
-		horizontalArrangement = Arrangement.spacedBy(12.dp),
-		modifier = Modifier.fillMaxWidth()
+		horizontalArrangement = Arrangement.spacedBy(12.dp)
 	) {
 		Text(
 			"${index + 1}",
@@ -542,7 +613,9 @@ private fun TracksScreenPlaceholder(
 					end = 64.dp
 				)
 				.aspectRatio(1f)
-				.clip(MaterialTheme.shapes.large)
+				// placeholders shouldn't use continuous corners
+				// because it's less performant
+				.clip(RoundedCornerShape(16.0.dp))
 				.background(MaterialTheme.colorScheme.surfaceContainer)
 				.shimmerLoading()
 		)
@@ -552,7 +625,7 @@ private fun TracksScreenPlaceholder(
 				.padding(top = 8.dp)
 				.fillMaxWidth(0.6f)
 				.height(24.dp)
-				.clip(ContinuousCapsule)
+				.clip(CircleShape)
 				.shimmerLoading()
 		)
 
@@ -561,7 +634,7 @@ private fun TracksScreenPlaceholder(
 				.padding(top = 4.dp)
 				.fillMaxWidth(0.4f)
 				.height(16.dp)
-				.clip(ContinuousCapsule)
+				.clip(CircleShape)
 				.shimmerLoading()
 		)
 
@@ -573,14 +646,14 @@ private fun TracksScreenPlaceholder(
 				modifier = Modifier
 					.width(120.dp)
 					.height(36.dp)
-					.clip(ContinuousCapsule)
+					.clip(CircleShape)
 					.shimmerLoading()
 			)
 			Box(
 				modifier = Modifier
 					.width(120.dp)
 					.height(36.dp)
-					.clip(ContinuousCapsule)
+					.clip(CircleShape)
 					.shimmerLoading()
 			)
 		}
@@ -600,7 +673,7 @@ private fun TracksScreenPlaceholder(
 						modifier = Modifier
 							.width(25.dp)
 							.height(14.dp)
-							.clip(ContinuousCapsule)
+							.clip(CircleShape)
 							.shimmerLoading()
 					)
 
@@ -613,14 +686,14 @@ private fun TracksScreenPlaceholder(
 							modifier = Modifier
 								.fillMaxWidth(0.7f)
 								.height(16.dp)
-								.clip(ContinuousCapsule)
+								.clip(CircleShape)
 								.shimmerLoading()
 						)
 						Box(
 							modifier = Modifier
 								.fillMaxWidth(0.5f)
 								.height(14.dp)
-								.clip(ContinuousCapsule)
+								.clip(CircleShape)
 								.shimmerLoading()
 						)
 					}
@@ -629,7 +702,7 @@ private fun TracksScreenPlaceholder(
 						modifier = Modifier
 							.width(36.dp)
 							.height(14.dp)
-							.clip(ContinuousCapsule)
+							.clip(CircleShape)
 							.shimmerLoading()
 					)
 				}
